@@ -1,0 +1,241 @@
+diff -uNr  ncurses/curses.priv.h.org ncurses/curses.priv.h
+--- ncurses/curses.priv.h.org	2011-01-23 06:10:18.000000000 +0900
++++ ncurses/curses.priv.h	2012-01-08 16:10:32.000000000 +0900
+@@ -135,6 +135,15 @@
+ #define USE_EMX_MOUSE 0
+ #endif
+ 
++/* kLIBC keyboard/mouse support */
++#if defined(__OS2__) && defined(__KLIBC__)
++#define USE_KLIBC_KBD   1
++#define USE_KLIBC_MOUSE 1
++#else
++#define USE_KLIBC_KBD   0
++#define USE_KLIBC_MOUSE 0
++#endif
++
+ #define DEFAULT_MAXCLICK 166
+ #define EV_MAX		8	/* size of mouse circular event queue */
+ 
+@@ -1032,6 +1041,10 @@
+ 	bool		_use_rmso;	/* true if we may use 'rmso'	     */
+ 	bool		_use_rmul;	/* true if we may use 'rmul'	     */
+ 
++#if USE_KLIBC_KBD
++	bool		_extended_key;	/* true if an extended key	     */
++#endif
++
+ 	/*
+ 	 * These data correspond to the state of the idcok() and idlok()
+ 	 * functions.  A caveat is in order here:  the XSI and SVr4
+diff -uNr  ncurses/base/lib_getch.c.org ncurses/base/lib_getch.c
+--- ncurses/base/lib_getch.c.org	2010-12-26 08:24:04.000000000 +0900
++++ ncurses/base/lib_getch.c	2012-01-08 16:10:32.000000000 +0900
+@@ -257,6 +257,13 @@
+ 	n = 1;
+     } else
+ #endif
++#if USE_KLIBC_KBD
++    if (isatty(SP->_ifd) && SP->_cbreak) {
++	ch = _read_kbd(0, 1, !SP->_raw);
++	n = (ch == -1) ? -1 : 1;
++	SP->_extended_key = ( ch == 0 );
++    } else
++#endif
+     {				/* Can block... */
+ #ifdef USE_TERM_DRIVER
+ 	int buf;
+diff -uNr  ncurses/base/lib_mouse.c.org ncurses/base/lib_mouse.c
+--- ncurses/base/lib_mouse.c.org	2011-01-23 04:47:46.000000000 +0900
++++ ncurses/base/lib_mouse.c	2012-01-08 16:15:50.000000000 +0900
+@@ -120,6 +120,17 @@
+ #endif
+ #endif				/* use_SYSMOUSE */
+ 
++#if USE_KLIBC_MOUSE
++#include <sys/socket.h>
++#define pipe(handles) socketpair(AF_LOCAL, SOCK_STREAM, 0, handles)
++#define DosWrite(hfile, pbuffer, cbwrite, pcbactual) \
++		write(hfile, pbuffer, cbwrite)
++#define DosExit(action, result ) /* do nothing */
++#define DosCreateThread(ptid, pfn, param, flag, cbStack) \
++		(*(ptid) = _beginthread(pfn, NULL, cbStack, \
++					(void *)param), (*(ptid) == -1))
++#endif
++
+ #define MY_TRACE TRACE_ICALLS|TRACE_IEVENT
+ 
+ #define	MASK_RELEASE(x)		(mmask_t) NCURSES_MOUSE_MASK(x, 001)
+@@ -219,7 +230,11 @@
+ }
+ 
+ static void
++#if USE_KLIBC_MOUSE
++mouse_server(void *param)
++#else
+ mouse_server(unsigned long param)
++#endif
+ {
+     SCREEN *sp = (SCREEN *) param;
+     unsigned short fWait = MOU_WAIT;
+diff -uNr  ncurses/base/lib_newterm.c.org ncurses/base/lib_newterm.c
+--- ncurses/base/lib_newterm.c.org	2010-05-21 08:25:18.000000000 +0900
++++ ncurses/base/lib_newterm.c	2012-01-08 16:16:44.000000000 +0900
+@@ -283,7 +283,8 @@
+ 	    NCURSES_SP_NAME(typeahead) (NCURSES_SP_ARGx fileno(_ifp));
+ #ifdef TERMIOS
+ 	    SP_PARM->_use_meta = ((new_term->Ottyb.c_cflag & CSIZE) == CS8 &&
+-				  !(new_term->Ottyb.c_iflag & ISTRIP));
++				  !(new_term->Ottyb.c_iflag & ISTRIP)) ||
++				  USE_KLIBC_KBD;
+ #else
+ 	    SP_PARM->_use_meta = FALSE;
+ #endif
+diff -uNr  ncurses/tinfo/lib_raw.c.org ncurses/tinfo/lib_raw.c
+--- ncurses/tinfo/lib_raw.c.org	2010-04-25 08:49:12.000000000 +0900
++++ ncurses/tinfo/lib_raw.c	2012-01-08 17:23:14.000000000 +0900
+@@ -66,6 +66,11 @@
+ #define _nc_setmode(mode)	/* nothing */
+ #endif
+ 
++#if USE_KLIBC_KBD
++#define INCL_KBD
++#include <os2.h>
++#endif
++
+ #define COOKED_INPUT	(IXON|BRKINT|PARMRK)
+ 
+ #ifdef TRACE
+@@ -100,6 +105,17 @@
+ #endif
+ 	result = NCURSES_SP_NAME(_nc_set_tty_mode) (NCURSES_SP_ARGx &buf);
+ 	if (result == OK) {
++#if USE_KLIBC_KBD
++	    KBDINFO kbdinfo;
++
++	    kbdinfo.cb = sizeof( kbdinfo );
++	    KbdGetStatus( &kbdinfo, 0 );
++
++	    kbdinfo.cb = sizeof( kbdinfo );
++	    kbdinfo.fsMask &= ~KEYBOARD_ASCII_MODE;
++	    kbdinfo.fsMask |= KEYBOARD_BINARY_MODE;
++	    KbdSetStatus( &kbdinfo, 0 );
++#endif
+ 	    SP_PARM->_raw = TRUE;
+ 	    SP_PARM->_cbreak = 1;
+ 	    termp->Nttyb = buf;
+@@ -218,6 +234,17 @@
+ #endif
+ 	result = NCURSES_SP_NAME(_nc_set_tty_mode) (NCURSES_SP_ARGx &buf);
+ 	if (result == OK) {
++#if USE_KLIBC_KBD
++	    KBDINFO kbdinfo;
++
++	    kbdinfo.cb = sizeof( kbdinfo );
++	    KbdGetStatus( &kbdinfo, 0 );
++
++	    kbdinfo.cb = sizeof( kbdinfo );
++	    kbdinfo.fsMask &= ~KEYBOARD_BINARY_MODE;
++	    kbdinfo.fsMask |= KEYBOARD_ASCII_MODE;
++	    KbdSetStatus( &kbdinfo, 0 );
++#endif
+ 	    SP_PARM->_raw = FALSE;
+ 	    SP_PARM->_cbreak = 0;
+ 	    termp->Nttyb = buf;
+diff -uNr  ncurses/tinfo/lib_ttyflags.c.org ncurses/tinfo/lib_ttyflags.c
+--- ncurses/tinfo/lib_ttyflags.c.org	2010-12-26 08:43:58.000000000 +0900
++++ ncurses/tinfo/lib_ttyflags.c	2012-01-08 16:20:20.000000000 +0900
+@@ -105,7 +105,11 @@
+ 	    result = CallDriver_2(SP_PARM, sgmode, TRUE, buf);
+ #else
+ 	    for (;;) {
+-		if (SET_TTY(termp->Filedes, buf) != 0) {
++		if ((SET_TTY(termp->Filedes, buf) != 0)
++#if USE_KLIBC_KBD
++		    && !isatty(cur_term->Filedes)
++#endif
++		   ) {
+ 		    if (errno == EINTR)
+ 			continue;
+ 		    if ((errno == ENOTTY) && (SP_PARM != 0))
+diff -uNr  ncurses/tty/lib_twait.c.org ncurses/tty/lib_twait.c
+--- ncurses/tty/lib_twait.c.org	2010-12-26 08:43:58.000000000 +0900
++++ ncurses/tty/lib_twait.c	2012-01-08 16:26:20.000000000 +0900
+@@ -53,6 +53,11 @@
+ #include <OS.h>
+ #endif
+ 
++#if USE_KLIBC_KBD
++#define INCL_KBD
++#include <os2.h>
++#endif
++
+ #if USE_FUNC_POLL
+ # if HAVE_SYS_TIME_H
+ #  include <sys/time.h>
+@@ -184,6 +189,12 @@
+     fd_set set;
+ #endif
+ 
++#if USE_KLIBC_KBD
++    fd_set saved_set;
++    KBDKEYINFO ki;
++    struct timeval tv;
++#endif
++
+     long starttime, returntime;
+ 
+     TR(TRACE_IEVENT, ("start twait: %d milliseconds, mode: %d",
+@@ -329,10 +340,12 @@
+      */
+     FD_ZERO(&set);
+ 
++#if !USE_KLIBC_KBD
+     if (mode & TW_INPUT) {
+ 	FD_SET(sp->_ifd, &set);
+ 	count = sp->_ifd + 1;
+     }
++#endif
+     if ((mode & TW_MOUSE)
+ 	&& (fd = sp->_mouse_fd) >= 0) {
+ 	FD_SET(fd, &set);
+@@ -352,6 +365,31 @@
+     }
+ #endif
+ 
++#if USE_KLIBC_KBD
++    for(saved_set = set;; set = saved_set) {
++	if ((mode & TW_INPUT)
++	    && (SP->_extended_key
++		|| (KbdPeek(&ki, 0) == 0
++		    && (ki.fbStatus & KBDTRF_FINAL_CHAR_IN)))) {
++	    FD_ZERO(&set);
++	    FD_SET(SP->_ifd, &set);
++	    result = 1;
++	    break;
++	}
++
++	tv.tv_sec = 0;
++	tv.tv_usec = (milliseconds == 0) ? 0 : (10 * 1000);
++
++	if ((result = select(count, &set, NULL, NULL, &tv)) != 0 )
++	    break;
++
++	/* Time out ? */
++	if (milliseconds >= 0 && _nc_gettime(&t0, FALSE) >= milliseconds) {
++	    result = 0;
++	    break;
++	}
++    }
++#else
+     if (milliseconds >= 0) {
+ 	struct timeval ntimeout;
+ 	ntimeout.tv_sec = milliseconds / 1000;
+@@ -360,6 +398,7 @@
+     } else {
+ 	result = select(count, &set, NULL, NULL, NULL);
+     }
++#endif
+ 
+ #ifdef NCURSES_WGETCH_EVENTS
+     if ((mode & TW_EVENT) && evl) {
